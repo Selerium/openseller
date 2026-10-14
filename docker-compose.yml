@@ -7,9 +7,12 @@ services:
     environment:
       - PROD=${PROD:-false}
     volumes:
-      # postgres:18 keeps its cluster under /var/lib/postgresql (PGDATA=/var/lib/postgresql/18/docker),
-      # NOT the pre-18 /var/lib/postgres/data path. Mounting the old path silently stores nothing here.
-      - ./data:/var/lib/postgresql
+      # Named volume (not a bind mount): postgres reads POSTGRES_PASSWORD only at cluster
+      # creation, so the data must be destroyable with `down -v` / `--fresh-db` whenever
+      # the credentials change. A bind-mounted ./data survived both and kept serving the
+      # OLD password while the backend connected with the new one — every connection then
+      # failed auth with no hint why.
+      - pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -64,6 +67,10 @@ services:
       # otherwise the bind mount hides it and npx starts downloading a different prisma major at runtime
       - backend_node_modules:/app/node_modules
       - ./uploads:/app/uploads
+      # nightly pg_dump output (scripts/backup-db.sh, daily 1am UTC via container cron).
+      # A bind mount, not a volume, so dumps are plain files in ./backups on the host —
+      # trivial to copy offsite, which is the whole point of a backup.
+      - ./backups:/app/backups
     depends_on:
       db:
         condition: service_healthy
@@ -123,5 +130,6 @@ services:
       - backend
 
 volumes:
+  pgdata:
   backend_node_modules:
   frontend_node_modules:

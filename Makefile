@@ -228,4 +228,4 @@ clean:
 	DOCKER_MODE=true $(COMPOSE) down -v --remove-orphans
 	rm -rf frontend/.next frontend/.next-docker frontend/.next.old frontend/node_modules backend/node_modules
 	rm -rf uploads/*
-	@echo "containers, volumes, build output and uploads cleaned (./data kept)"
+	@echo "containers, volumes (including the pgdata database volume), build output and uploads cleaned"

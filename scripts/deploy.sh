@@ -16,6 +16,11 @@
 #   ./scripts/deploy.sh --regenerate-secrets
 #                                        rotate JWT_SECRET + POSTGRES_PASSWORD (destroys the
 #                                        database volume first — existing data is lost)
+#   ./scripts/deploy.sh --fresh-db       drop the pgdata volume and start postgres from scratch.
+#                                        Needed when the cluster predates the password:
+#                                        postgres reads POSTGRES_PASSWORD only at cluster
+#                                        creation, so a stale volume keeps the OLD password
+#                                        and every connection with the new one fails auth.
 #
 # Non-interactive inputs (also respected interactively as prefilled defaults):
 #   SITE_NAME CERTBOT_EMAIL ADMIN_EMAIL ADMIN_PASSWORD SITE_DOMAIN STORE_CURRENCY
@@ -29,12 +34,16 @@ cd "$ROOT"
 
 DEPLOY_ENV="$ROOT/.deploy.env"
 COMPOSE="${COMPOSE:-docker compose}"
+# Named volume holding the postgres cluster. Compose prefixes it with the project name
+# (directory basename unless COMPOSE_PROJECT_NAME / -p overrides it).
+PG_VOLUME="${COMPOSE_PROJECT_NAME:-$(basename "$ROOT")}_pgdata"
 
 YES=false
 PRINT_ONLY=false
 SEED_FLAG=""
 SKIP_UP=false
 REGEN_SECRETS=false
+FRESH_DB=false
 
 usage() {
   awk 'NR < 2 { next } /^$/ { exit } { sub(/^# ?/, ""); print }' "$0"
@@ -49,6 +58,7 @@ for arg in "$@"; do
     --no-seed) SEED_FLAG="no" ;;
     --skip-up) SKIP_UP=true ;;
     --regenerate-secrets) REGEN_SECRETS=true ;;
+    --fresh-db) FRESH_DB=true ;;
     -h|--help) usage 0 ;;
     *) echo "unknown flag: $arg (see --help)" >&2; exit 1 ;;
   esac
@@ -68,7 +78,9 @@ fi
 # --- previous answers ---------------------------------------------------------
 # Sourced for defaults only: every value below is re-validated before use, so a
 # hand-edited .deploy.env cannot smuggle a bad value through.
+FIRST_RUN=true
 if [ -f "$DEPLOY_ENV" ]; then
+  FIRST_RUN=false
   # shellcheck disable=SC1090
   set -a; . "$DEPLOY_ENV"; set +a
 fi
@@ -362,11 +374,44 @@ if [ "$SKIP_UP" = true ]; then
 fi
 
 # --- bring-up ----------------------------------------------------------------------
+# Stale-cluster guard. Postgres reads POSTGRES_PASSWORD exactly once, at cluster
+# creation: a pgdata volume that predates .deploy.env (an old `make dev`, an aborted
+# deploy) keeps its OLD password while the backend connects with the NEW one, and every
+# connection then fails auth. Because the data lives in a named volume (not a bind
+# mount), `down -v` and the wipe below genuinely destroy it — that is the point.
+wipe_data() {
+  echo "stopping containers and dropping volume $PG_VOLUME (ALL database content is destroyed)…"
+  $COMPOSE down >/dev/null 2>&1 || true
+  docker volume rm "$PG_VOLUME" >/dev/null 2>&1 || true
+}
+cluster_exists() { docker volume inspect "$PG_VOLUME" >/dev/null 2>&1; }
+
+if [ "$FRESH_DB" = true ]; then
+  if [ "$YES" = true ]; then
+    wipe_data
+  else
+    ask_yes_no WIPE "Drop $PG_VOLUME and start postgres from scratch (destroys ALL data)" "no"
+    if [ "$WIPE" = yes ]; then wipe_data; else echo "keeping existing database volume."; fi
+  fi
+elif [ "$FIRST_RUN" = true ] && cluster_exists; then
+  echo "WARNING: docker volume $PG_VOLUME already holds a postgres cluster from a previous run." >&2
+  echo "It keeps its OLD password; the backend would connect with the new one and fail auth." >&2
+  if [ "$YES" = true ]; then
+    echo "Re-run with --fresh-db to drop it and start over." >&2
+    exit 1
+  fi
+  ask_yes_no WIPE "Drop it and start fresh" "no"
+  if [ "$WIPE" = yes ]; then wipe_data; else echo "keeping existing volume — if the backend reports bad credentials, this is why."; fi
+fi
+
 export PROD="$COMPOSE_PROD"
 export DOCKER_MODE=true
 export FRONTEND_DEV="$COMPOSE_DEV"
 
 echo "building + starting containers (first build takes a few minutes)…"
+# Created up front so docker doesn't make them root-owned on first mount, which would
+# leave the host operator unable to read their own backup files without sudo.
+mkdir -p ./backups ./uploads
 $COMPOSE up -d --build
 
 echo "waiting for the API…"
@@ -381,7 +426,16 @@ if [ "$ready" != true ]; then
 fi
 
 echo "applying database migrations…"
-$COMPOSE exec -T backend npx prisma migrate deploy
+if ! $COMPOSE exec -T backend npx prisma migrate deploy; then
+  cat >&2 <<EOF
+migrations failed — most likely the database credentials do not match the cluster.
+Postgres reads POSTGRES_PASSWORD only at cluster creation, so if the $PG_VOLUME volume
+predates .deploy.env (or the password was changed afterwards), the cluster still holds
+the OLD password. Re-run with --fresh-db to drop the volume and start over (destroys
+all data).
+EOF
+  exit 1
+fi
 
 # Idempotent seed: `make seed`-style upserts make re-seeding harmless, but skipping when
 # the catalog is already populated keeps a re-run from resetting demo edits.
@@ -411,6 +465,16 @@ else
   echo "WARNING: admin login failed — check 'docker compose logs backend'" >&2
 fi
 
+# The backend entrypoint installs the crontab on every start, but "installed" is not
+# "running" — confirm the daemon survived the boot before promising nightly backups.
+echo "checking nightly backups…"
+if $COMPOSE exec -T backend sh -c 'pgrep -x cron >/dev/null' 2>/dev/null; then
+  echo "nightly backups ACTIVE: pg_dump daily at 1am UTC into ./backups (14-day retention)"
+else
+  echo "WARNING: cron is not running in the backend container — no nightly backups." >&2
+  echo "Check 'docker compose logs backend' and 'docker compose exec backend service cron status'." >&2
+fi
+
 # --- summary --------------------------------------------------------------------------
 cat <<EOF
 
@@ -418,9 +482,13 @@ cat <<EOF
 Store:    $STORE_URL
 Admin:    $STORE_URL/admin  ($ADMIN_EMAIL)
 Health:   $STORE_URL/api/health
-Data:     ./data (postgres), ./uploads (product media), backend_node_modules/frontend_node_modules (volumes)
+Data:     named volumes (pgdata for postgres), ./uploads (product media)
 Config:   .deploy.env is the source of truth; config/.env.* are derived from it.
 Rerun:    ./scripts/deploy.sh reuses saved answers (demo-seed is asked again each run).
+Backups:  nightly pg_dump at 1am UTC into ./backups (kept 14 days).
+  ⚠ OFFSITE: ./backups lives on THIS machine, next to the database it backs up.
+  If this disk dies, both die together. Copy dumps elsewhere — object storage,
+  another host, anywhere but here — or you do not have backups, you have files.
 EOF
 if [ -z "${STRIPE_SECRET_KEY:-}" ]; then
   if [ "$PROD_MODE" = true ]; then

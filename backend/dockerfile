@@ -5,4 +5,23 @@ WORKDIR /app
 COPY package*.json /app/
 RUN npm install
 
+# Daily postgres backups run from cron inside this container (see backend/entrypoint.sh
+# and scripts/backup-db.sh). The client comes from pgdg, not Debian bookworm: bookworm
+# ships pg15, and dumping a pg18 server with a three-major-versions-older pg_dump is
+# how you discover at 1am that a new catalog feature does not restore.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends curl ca-certificates gnupg cron \
+  && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg \
+  && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+    > /etc/apt/sources.list.d/pgdg.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends postgresql-client-18 \
+  && rm -rf /var/lib/apt/lists
+
+# Resolved at container start, when ./backend is bind-mounted over /app — so this must
+# live in the repo (backend/entrypoint.sh), not be COPYed here. Re-installs the crontab
+# on every (re)start, then hands off to CMD below.
+ENTRYPOINT ["sh", "/app/entrypoint.sh"]
+
 CMD ["sh", "-c", "npx prisma generate && for i in $(seq 1 30); do npx prisma migrate deploy && break; echo \"Waiting for database... ($i/30)\"; sleep 2; done && if [ \"$PROD\" = \"true\" ]; then npm run start; else npm run dev; fi"]

@@ -36,6 +36,8 @@ What it asks for and why:
 
 Re-runs are safe: saved answers are reused, secrets never rotate unless asked, and seeding is skipped when the catalog is already populated. Live secrets (`POSTGRES_PASSWORD`, `JWT_SECRET`) are generated with `openssl`, never prompted.
 
+Nightly `pg_dump` runs at 1am UTC from cron inside the backend container into `./backups` (14-day retention). Those files sit next to the database they back up — copy them offsite (object storage, another host) or you have files, not backups.
+
 ## Engineering highlights
 
 What I'd want a reviewer to notice — the decisions, not just the features:
@@ -83,6 +85,6 @@ Single origin behind nginx (`/api` → backend), so no CORS or cookie configurat
 | `make test-account email=...` | Throwaway verified shopper for ad-hoc probing |
 | `make test-order mode=paid` | Throwaway guest order in a chosen state |
 | `make test-clean-email prefix=...` / `make test-set-token email=... mode=...` | Sweep helpers and verification-token writer |
-| `make clean` | Remove containers, volumes, build output, uploads (keeps `./data`) |
+| `make clean` | Remove containers, volumes (including `pgdata`), build output, uploads |
 
 Suites in `backend/test/*.mjs` drive the stack over HTTP like a browser would (cookie attributes, wrong-origin links, auth-guard fall-through); `frontend/test/cart.mjs` asserts the pure cart reducer. They need a seeded stack; `email` renames a shopper mid-run so it uses a throwaway address and runs last.

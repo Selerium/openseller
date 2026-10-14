@@ -5,11 +5,14 @@ config/.env.*
 # secrets — never commit it.
 .deploy.env
 
-# Postgres cluster (bind mounted)
-data/
+# Nightly pg_dump output. The directory itself is tracked via .gitkeep; the dumps are
+# the whole database and must not be committed.
+backups/*
+!backups/.gitkeep
 
 # Uploaded product media. The directory itself is tracked via .gitkeep so the bind mount
 # has somewhere to land; its contents are user data and must not be committed.
+backups/*
 uploads/*
 !uploads/.gitkeep
 
