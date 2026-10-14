@@ -1,0 +1,127 @@
+services:
+  db:
+    image: postgres:18
+    restart: always
+    env_file:
+      - ./config/.env.database
+    environment:
+      - PROD=${PROD:-false}
+    volumes:
+      # postgres:18 keeps its cluster under /var/lib/postgresql (PGDATA=/var/lib/postgresql/18/docker),
+      # NOT the pre-18 /var/lib/postgres/data path. Mounting the old path silently stores nothing here.
+      - ./data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  redis:
+    image: redis:8-alpine
+    restart: always
+    # Persistence is deliberately off. Every key here is a TTL'd idempotency record, so an
+    # RDB snapshot would cost disk and startup time to preserve data that is worthless a
+    # second later. If Redis restarts empty, the only consequence is that in-flight retries
+    # lose their replay record -- never that stored data becomes wrong.
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      # Backstop only. allkeys-lru means that if a memory leak ever filled the instance, the
+      # oldest keys go rather than writes start failing.
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - allkeys-lru
+    # No `ports` on purpose: only the backend talks to Redis. Publishing 6379 would put live
+    # session tokens -- /login responses are replayed with their Set-Cookie -- one port-scan
+    # away from being readable by anyone on the network.
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  backend:
+    build: ./backend
+    restart: always
+    env_file:
+      - ./config/.env.backend
+    environment:
+      - PROD=${PROD:-false}
+      # only used to pick the right dev default for STORE_URL: in split mode the storefront is
+      # on :3000, in single-origin mode nginx serves it from :80. See lib/config.ts storeUrl.
+      - DOCKER_MODE=${DOCKER_MODE:-false}
+    volumes:
+      - ./backend:/app
+      # keeps the node_modules baked into the image visible under the ./backend bind mount,
+      # otherwise the bind mount hides it and npx starts downloading a different prisma major at runtime
+      - backend_node_modules:/app/node_modules
+      - ./uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      # condition, not just ordering: the backend asks Redis on the first mutating request, and
+      # a not-yet-listening Redis means that request runs without an idempotency record.
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    restart: always
+    env_file:
+      - ./config/.env.frontend
+    environment:
+      - PROD=${PROD:-false}
+      # Two independent questions, deliberately two variables.
+      #
+      # DOCKER_MODE answers "am I in the compose stack?" -- always yes, so `inDocker` in
+      # next.config.ts stays true and the /uploads rewrite onto the API origin stays disarmed
+      # (nginx serves /uploads before Next sees the request anyway). It is NOT the frontend's
+      # dev/prod switch.
+      - DOCKER_MODE=true
+      # FRONTEND_DEV is the frontend's own switch: dev server with hot reload, or a real
+      # production build. Sharing one variable with the above is what made `make docker-prod`
+      # serve the Next dev server under PROD=true.
+      - DEV=${FRONTEND_DEV:-true}
+    volumes:
+      - ./frontend:/app
+      # same reason as the backend: a bind mount over /app would otherwise hide the image's
+      # node_modules and npm would re-resolve every dependency at runtime
+      - frontend_node_modules:/app/node_modules
+      - ./frontend/.next:/app/.next
+    expose:
+      - "3000"
+    depends_on:
+      - backend
+
+  nginx:
+    build: ./nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/templates/default.conf:ro
+      - ./nginx/default.dev.conf:/etc/nginx/templates/default.dev.conf:ro
+      - ./nginx/default.full.conf:/etc/nginx/templates/default.full.conf:ro
+      - ./nginx/default.full.dev.conf:/etc/nginx/templates/default.full.dev.conf:ro
+      - ./nginx/certs:/etc/letsencrypt
+    env_file:
+      - ./config/.env.nginx
+    environment:
+      - PROD=${PROD:-false}
+      # drives which config the entrypoint selects: see nginx/entrypoint.sh for the matrix
+      - DOCKER_MODE=${DOCKER_MODE:-false}
+    depends_on:
+      - backend
+
+volumes:
+  backend_node_modules:
+  frontend_node_modules:

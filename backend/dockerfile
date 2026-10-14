@@ -1,0 +1,8 @@
+FROM node:25
+
+WORKDIR /app
+
+COPY package*.json /app/
+RUN npm install
+
+CMD ["sh", "-c", "npx prisma generate && for i in $(seq 1 30); do npx prisma migrate deploy && break; echo \"Waiting for database... ($i/30)\"; sleep 2; done && if [ \"$PROD\" = \"true\" ]; then npm run start; else npm run dev; fi"]

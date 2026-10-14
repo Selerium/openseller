@@ -1,0 +1,33 @@
+# Local env files. The .example.env.* files next to them are the committed templates.
+config/.env.*
+
+# Postgres cluster (bind mounted)
+data/
+
+# Uploaded product media. The directory itself is tracked via .gitkeep so the bind mount
+# has somewhere to land; its contents are user data and must not be committed.
+uploads/*
+!uploads/.gitkeep
+
+# Build output and dependencies. .next-docker is the Docker-mode distDir (see next.config.ts),
+# kept separate so standalone and Docker dev servers can both hold their PID lock.
+frontend/.next/
+frontend/.next-docker/
+frontend/node_modules/
+backend/node_modules/
+backend/src/generated/
+
+# TypeScript
+*.tsbuildinfo
+frontend/tsconfig.tsbuildinfo
+
+# TLS material, if certs are ever issued into the repo rather than the volume
+nginx/certs/
+
+# Editor and OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
+*.log
+npm-debug.log*

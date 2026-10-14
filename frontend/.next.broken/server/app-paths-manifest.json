@@ -1,0 +1,22 @@
+{
+  "/(auth)/forgot-password/page": "app/(auth)/forgot-password/page.js",
+  "/(auth)/login/page": "app/(auth)/login/page.js",
+  "/(auth)/register/page": "app/(auth)/register/page.js",
+  "/(auth)/reset-password/page": "app/(auth)/reset-password/page.js",
+  "/(auth)/verify-email/page": "app/(auth)/verify-email/page.js",
+  "/(shop)/cart/page": "app/(shop)/cart/page.js",
+  "/(shop)/checkout/cancelled/page": "app/(shop)/checkout/cancelled/page.js",
+  "/(shop)/checkout/mock-pay/[orderId]/page": "app/(shop)/checkout/mock-pay/[orderId]/page.js",
+  "/(shop)/checkout/page": "app/(shop)/checkout/page.js",
+  "/(shop)/checkout/success/page": "app/(shop)/checkout/success/page.js",
+  "/(shop)/marketplace/[slug]/page": "app/(shop)/marketplace/[slug]/page.js",
+  "/(shop)/marketplace/page": "app/(shop)/marketplace/page.js",
+  "/(shop)/onboarding/page": "app/(shop)/onboarding/page.js",
+  "/(shop)/profile/addresses/page": "app/(shop)/profile/addresses/page.js",
+  "/(shop)/profile/orders/page": "app/(shop)/profile/orders/page.js",
+  "/(shop)/profile/page": "app/(shop)/profile/page.js",
+  "/(shop)/settings/page": "app/(shop)/settings/page.js",
+  "/_global-error/page": "app/_global-error/page.js",
+  "/_not-found/page": "app/_not-found/page.js",
+  "/page": "app/page.js"
+}

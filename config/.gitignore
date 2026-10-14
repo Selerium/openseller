@@ -1,0 +1,4 @@
+.env.backend
+.env.database
+.env.nginx
+.env.frontend

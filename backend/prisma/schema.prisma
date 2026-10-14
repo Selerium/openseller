@@ -1,0 +1,469 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model RefreshTokens {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  ip        String?
+  createdAt DateTime  @default(now())
+  expiresAt DateTime  @default(dbgenerated("(now() + '7 days'::interval)"))
+  revokedAt DateTime?
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model User {
+  id        String    @id @default(uuid())
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  email                           String               @unique
+  emailVerified                   Boolean              @default(false)
+  emailVerificationToken          String?
+  emailVerificationTokenExpiresAt DateTime?
+  // Set when the address is *changed*, never cleared. Nullable rather than a boolean because
+  // it doubles as the timestamp, and because NULL is the discriminator cleanupUnverifiedUsers
+  // needs: an unverified account that has never changed its address is an abandoned signup,
+  // whereas one that has is a real account caught mid-verify. See lib/tokenCleanup.ts.
+  emailChangedAt                  DateTime?
+  password                        String
+  refreshTokens                   RefreshTokens[]
+  passwordResetTokens             PasswordResetToken[]
+
+  // Auth only. Everything a customer buys or owns belongs on Profile, so that revoking or
+  // deleting an account cannot cascade into order history, reviews or saved cards.
+  profile Profile?
+}
+
+model Profile {
+  id        String    @id @default(uuid())
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id])
+
+  name      String
+  firstTime Boolean @default(true)
+
+  role   Role?   @default(USER)
+  gender Gender?
+  dob    DateTime?
+  nationality String?
+  phone       String?
+
+  // Stripe customer, created lazily on the first successful checkout or card setup.
+  // Lives here rather than on User because it is a billing identity tied to purchases,
+  // not a credential.
+  stripeCustomerId String? @unique
+
+  addresses      Address[]
+  orders         Order[]
+  reviews        Review[]
+  paymentMethods PaymentMethod[]
+  complaints     Complaint[]
+}
+
+enum Gender {
+  MALE
+  FEMALE
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+// ---------------------------------------------------------------------------
+// Catalog
+// ---------------------------------------------------------------------------
+
+model Category {
+  id        String    @id @default(uuid())
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  name      String
+  slug      String  @unique
+  sortOrder Int     @default(0)
+
+  products Product[]
+
+  @@index([sortOrder])
+}
+
+enum ProductStatus {
+  // not published yet
+  DRAFT
+  // enabled and listed in the marketplace
+  ACTIVE
+  // disabled by an admin; hidden from the marketplace but kept for order history
+  ARCHIVED
+}
+
+model Product {
+  id        String    @id @default(uuid())
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  slug        String @unique
+  title       String
+  brief       String
+  description String
+  status      ProductStatus @default(DRAFT)
+
+  categoryId String?
+  category   Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  // Denormalised rollups, rewritten inside the same transaction as the writes they derive from.
+  // minPriceCents = cheapest ACTIVE variant price, stockTotal = sum of variant stock.
+  // Card views read these instead of aggregating every variant on every request.
+  minPriceCents Int @default(0)
+  stockTotal    Int @default(0)
+
+  // Whole-product markdown, 0-100. NOT NULL with a zero default, so "no discount" needs no
+  // special case in a filter or a card.
+  //
+  // A percentage rather than a stored "was" price: one value covers every variant of a variant
+  // product, and editing a price can never leave a stale original behind. The cost is that the
+  // effective price is not an integer division, so it is rounded half-up to a whole minor unit
+  // by effectivePrice() in lib/catalog.ts — which card, detail and checkout must all share or
+  // they will disagree by a cent.
+  discountPercent Int @default(0)
+
+  // minPriceCents after the markdown. Stored rather than computed in a sort because Prisma
+  // cannot order by an expression, and sorting on raw minPriceCents would rank a 50%-off
+  // 100.00 product above an undiscounted 60.00 one — i.e. "sort by price" would not actually
+  // sort by the price on the card. Maintained by recomputeProductRollup alongside minPriceCents.
+  salePriceCents Int @default(0)
+
+  // Rollups over published reviews, maintained on review create/update/delete
+  ratingAvg   Float @default(0)
+  ratingCount Int   @default(0)
+
+  images   ProductImage[]
+  variants Variant[]
+  reviews  Review[]
+
+  @@index([status, categoryId])
+  @@index([createdAt])
+  // Supports the marketplace `?discounted=true` filter. Plain btree rather than partial: Prisma's
+  // index DSL cannot express a partial index, and hand-writing one in the migration would make
+  // `prisma migrate diff` report permanent drift.
+  @@index([discountPercent])
+  // Backs `?sort=price_asc|price_desc`.
+  @@index([salePriceCents])
+}
+
+model ProductImage {
+  id        String    @id @default(uuid())
+  createdAt DateTime  @default(now())
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  url      String
+  alt      String?
+  position Int     @default(0)
+
+  @@index([productId, position])
+}
+
+model Variant {
+  id        String    @id @default(uuid())
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  sku   String @unique
+  // "Default" for a simple single-SKU product, otherwise the human label e.g. "Matte / Large"
+  name      String
+  priceCents Int
+  stock     Int      @default(0)
+  // drives the admin "nearing out of stock" report; per-variant override of LOW_STOCK_THRESHOLD
+  lowStockThreshold Int @default(5)
+  position  Int     @default(0)
+
+  @@index([productId, position])
+}
+
+enum ReviewStatus {
+  PUBLISHED
+  HIDDEN
+}
+
+model Review {
+  id        String    @id @default(uuid())
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  // the reviewer's Profile, not User: a review is a statement about a purchase, so it
+  // belongs with the commerce side of the account
+  profileId String
+  profile   Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  rating Int
+  title  String?
+  body   String?
+
+  status ReviewStatus @default(PUBLISHED)
+
+  // one review per customer per product
+  @@unique([productId, profileId])
+  @@index([productId, status, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Addresses
+// ---------------------------------------------------------------------------
+
+model Address {
+  id        String    @id @default(uuid())
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  profileId String
+  profile   Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  label         String  @default("Home")
+  recipientName String
+  line1         String
+  line2         String?
+  city          String
+  region        String?
+  postalCode    String?
+  // ISO 3166-1 alpha-2, matching the list in frontend/src/components/form/countrySelector.tsx
+  countryCode   String
+  phone         String?
+
+  isDefault Boolean @default(false)
+
+  @@index([profileId])
+}
+
+// ---------------------------------------------------------------------------
+// Homepage
+// ---------------------------------------------------------------------------
+
+model HomePage {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // The whole editor tree as one JSON document: sections -> columns -> elements.
+  //
+  // Deliberately not three normalized tables. The storefront reads the page as a unit on
+  // every request, the editor writes the whole tree as a unit on every change, and neither
+  // side ever needs to query *inside* a section. Normalized rows would add position
+  // bookkeeping, cascade rules and an N-1 read to serve a document that is loaded and
+  // saved wholesale -- the same reason Order.shippingAddress is a Json column.
+  //
+  // draft is the editor's work in progress; published is what GET /homepage serves. A null
+  // published means the owner has never published, which is distinct from "published as an
+  // empty page": the storefront falls back to its placeholder in that one case only.
+  draft     Json
+  published Json?
+}
+
+// ---------------------------------------------------------------------------
+// Orders
+// ---------------------------------------------------------------------------
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  FULFILLED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PAID
+  REFUNDED
+  FAILED
+}
+
+model Order {
+  id    String   @id @default(uuid())
+  // human-facing reference, no formatting
+  number Int      @unique @default(autoincrement())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // null for guest checkout, which has no account to attach to
+  profileId String?
+  profile   Profile? @relation(fields: [profileId], references: [id], onDelete: SetNull)
+
+  guestEmail    String?
+  // sha256 of the one-time token handed to a guest so they can read their own order.
+  // The raw token is never stored.
+  guestTokenHash String? @unique
+
+  status  OrderStatus   @default(PENDING_PAYMENT)
+  payment PaymentStatus @default(UNPAID)
+
+  currency      String @default("usd")
+  subtotalCents Int
+  shippingCents Int    @default(0)
+  taxCents      Int    @default(0)
+  totalCents    Int
+
+  // Address snapshots, so an order stays readable after the customer edits their address book
+  shippingAddress Json
+  billingAddress  Json?
+
+  stripeCheckoutSessionId String? @unique
+  stripePaymentIntentId   String? @unique
+
+  items      OrderItem[]
+  events     OrderEvent[]
+  complaints Complaint[]
+
+  @@index([profileId, createdAt])
+  @@index([guestEmail])
+  @@index([status, createdAt])
+}
+
+model OrderItem {
+  id      String @id @default(uuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  productId String
+  variantId String?
+
+  // snapshots so order history survives later edits or deletion of the product
+  title          String
+  variantName    String?
+  sku            String?
+  unitPriceCents Int
+  quantity       Int
+  imageUrl       String?
+
+  complaints Complaint[]
+
+  @@index([orderId])
+}
+
+model OrderEvent {
+  id      String @id @default(uuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  // payment.succeeded | status.changed | refund.issued | complaint.opened | note.added | ...
+  type  String
+  note  String?
+  // set for events visible only to admins, e.g. internal notes
+  adminOnly Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@index([orderId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Complaints: first-class order disputes, deliberately separate from reviews.
+// Reviews are a star rating on a product; a complaint is raised against something
+// that was actually bought.
+// ---------------------------------------------------------------------------
+
+enum ComplaintStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+  DISMISSED
+}
+
+enum ComplaintReason {
+  NOT_AS_DESCRIBED
+  DAMAGED
+  MISSING_ITEM
+  WRONG_ITEM
+  LATE_DELIVERY
+  QUALITY_ISSUE
+  OTHER
+}
+
+model Complaint {
+  id        String    @id @default(uuid())
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  // the specific line the customer is disputing; null for a whole-order complaint
+  orderItemId String?
+  orderItem   OrderItem? @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
+
+  profileId String?
+  profile   Profile? @relation(fields: [profileId], references: [id], onDelete: SetNull)
+  // captured for guest complainants so the complaint is still attributable
+  guestEmail String?
+
+  reason  ComplaintReason
+  details String
+  status  ComplaintStatus @default(OPEN)
+
+  resolution String?
+  resolvedAt DateTime?
+  // admin Profile id
+  resolvedBy String?
+
+  @@index([status, createdAt])
+  @@index([reason, status])
+  @@index([orderId])
+  @@index([profileId])
+}
+
+// ---------------------------------------------------------------------------
+// Saved payment methods (Stripe)
+// Only the display metadata is stored here. Card data never touches this database.
+// ---------------------------------------------------------------------------
+
+model PaymentMethod {
+  id        String    @id @default(uuid())
+  createdAt DateTime  @default(now())
+
+  profileId String
+  profile   Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  stripePaymentMethodId String @unique
+
+  brand    String
+  last4    String
+  expMonth Int
+  expYear  Int
+
+  isDefault Boolean @default(false)
+
+  @@index([profileId])
+}

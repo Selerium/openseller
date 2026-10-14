@@ -1,0 +1,176 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import AuthGate from "@/components/auth-gate";
+import { api } from "@/lib/api";
+import { formatMoney } from "@/lib/money";
+import { Spinner } from "@/components/ui/spinner";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import Container from "@/components/layout/container";
+import ComplaintDialog from "@/components/storefront/complaintDialog";
+import ReviewDialog from "@/components/storefront/reviewDialog";
+import {
+  orderStatusLabel,
+  orderStatusBadgeClass,
+  paymentStatusLabel,
+} from "@/lib/order-status";
+
+interface OrderSummary {
+  id: string;
+  number: number;
+  createdAt: string;
+  status: string;
+  payment: string;
+  totalCents: number;
+  currency: string;
+  itemCount: number;
+  openComplaints: number;
+  items?: Array<{
+    id: string;
+    title: string;
+    imageUrl: string | null;
+    quantity: number;
+  }>;
+}
+
+interface Page<T> {
+  items: T[];
+  total: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
+}
+
+function OrdersPage() {
+  const [data, setData] = useState<Page<OrderSummary> | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const res = await api<Page<OrderSummary>>("/orders");
+        setData(res.data);
+      } catch (e) {
+      } finally {
+        setLoading(false);
+      }
+    };
+    void load();
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <Spinner className="size-6" />
+      </div>
+    );
+  }
+
+  return (
+    <Container className="max-w-4xl p-6">
+      <h1 className="mb-6 text-3xl font-bold">My orders</h1>
+      {data?.items.length === 0 ? (
+        <Card>
+          <CardContent className="py-12 text-center">
+            <p className="text-muted-foreground">No orders yet</p>
+            <Button asChild className="mt-4">
+              <Link href="/marketplace">Shop now</Link>
+            </Button>
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="space-y-4">
+          {data?.items.map((o) => (
+            <Card key={o.id}>
+              <CardHeader className="flex flex-row items-center justify-between">
+                <div>
+                  <CardTitle>
+                    <Link href={`/profile/orders/${o.id}`} className="hover:underline">
+                      Order #{o.number}
+                    </Link>
+                  </CardTitle>
+                  <p className="text-sm text-muted-foreground">
+                    {new Date(o.createdAt).toLocaleString()}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Badge className={orderStatusBadgeClass(o.status)}>
+                    {orderStatusLabel(o.status)}
+                  </Badge>
+                  <Badge variant="outline">{paymentStatusLabel(o.payment)}</Badge>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="space-y-2">
+                  {o.items?.map((item) => (
+                    <div key={item.id} className="flex items-center justify-between text-sm">
+                      <span>
+                        {item.title}
+                        {item.quantity > 1 && ` × ${item.quantity}`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex items-center justify-between">
+                  <div className="text-sm text-muted-foreground">
+                    {o.itemCount} item{o.itemCount === 1 ? "" : "s"}
+                    {o.openComplaints > 0 && (
+                      <span className="ml-2 text-amber-600">
+                        {o.openComplaints} open complaint
+                        {o.openComplaints === 1 ? "" : "s"}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button variant="outline" size="sm" asChild>
+                      <Link href={`/profile/orders/${o.id}`}>View</Link>
+                    </Button>
+                    <ReviewDialog
+                      orderId={o.id}
+                      items={(o as any).items || []}
+                      trigger={
+                        <Button variant="outline" size="sm">
+                          Review
+                        </Button>
+                      }
+                    />
+                    <ComplaintButton orderId={o.id} />
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+    </Container>
+  );
+}
+
+function ComplaintButton({ orderId }: { orderId: string }) {
+  return (
+    <ComplaintDialog
+      orderId={orderId}
+      trigger={
+        <Button variant="outline" size="sm">
+          Report Complaint
+        </Button>
+      }
+    />
+  );
+}
+
+export default function OrdersRoute() {
+  return (
+    <AuthGate>
+      <OrdersPage />
+    </AuthGate>
+  );
+}
