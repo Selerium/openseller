@@ -40,8 +40,6 @@ Nightly `pg_dump` runs at 1am UTC from cron inside the backend container into `.
 
 ## Engineering highlights
 
-What I'd want a reviewer to notice — the decisions, not just the features:
-
 - **Auth model that survives real life.** `User` holds credentials only; all commerce data hangs off `Profile`, so deleting an account can't cascade into order history. The JWT subject *is* the profile id, so commerce queries never join back. Email change revokes verification without locking the user out mid-session (`verificationPending` vs signed-out are distinct states in the client).
 - **Checkout is honest about money.** Prices re-price server-side from the catalog at session creation; oversell is refused pre-payment but tolerated post-payment (a webhook race must never fail a charge already taken). Discount codes re-validate at purchase time with race-safe redemption counting, and Stripe line items are scaled so the receipt totals to the cent.
 - **Idempotency as infrastructure, not garnish.** Every mutating request can carry a key; same-key-different-body is a 422, 5xx releases the key, replays include `Set-Cookie` (a lost login response still authenticates). Redis holding session tokens is called out as a real trade, with the fail-open reasoning documented.
@@ -54,8 +52,6 @@ What I'd want a reviewer to notice — the decisions, not just the features:
 - **Storefront:** marketplace with search/filter/sort, product pages with variants and reviews, localStorage cart with server reconciliation (repriced/clamped/unavailable lines reported, never silently dropped), guest + account checkout with saved addresses, discount codes, Stripe Checkout or mock confirm.
 - **Accounts:** address book with defaults, order history with timelines, complaint filing with a two-sided live message thread (customer replies reopen closed threads), notifications inbox + header bell fed by WebSocket.
 - **Admin:** dashboard (metrics, discount-code CRUD), orders (fulfil/cancel/refund with timeline + complaint threads inline), complaints queue linking into per-complaint views (order, timeline, thread, reply, acknowledge/resolve/dismiss), visual homepage editor (draft/published isolation, validated JSON tree), product and catalog management.
-
-Seeded logins (password `password123`): `admin@openseller.test`, `ops@openseller.test`, `sarah@openseller.test` (+ more shoppers).
 
 ## Local development
 
