@@ -34,6 +34,7 @@ export function primaryNav(user: User | null): NavItem[] {
       { href: "/admin/products", label: "Products" },
       { href: "/admin/orders", label: "Orders" },
       { href: "/admin/complaints", label: "Complaints" },
+      { href: "/admin/notifications", label: "Notifications" },
     ];
   }
 

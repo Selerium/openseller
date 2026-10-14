@@ -3,6 +3,7 @@ import AppError from "./appError.ts";
 import { prisma } from "./prismaClient.ts";
 import { recomputeProductRollup } from "./catalog.ts";
 import { sendOrderConfirmation } from "./email.ts";
+import { notify } from "./notify.ts";
 
 /**
  * Is this caller the buyer of `order`?
@@ -158,6 +159,17 @@ export async function markOrderPaid(
 
   // Resolve the recipient only after the commit, and never let a mail failure undo the payment.
   const recipient = await resolveRecipient(order.profileId, order.guestEmail);
+
+  // Same rule as the confirmation email below: the inbox row must never undo the payment,
+  // so it is written after the commit and never awaited to success.
+  if (order.profileId) {
+    void notify(order.profileId, {
+      type: "order.paid",
+      title: `Payment confirmed for order #${order.number}`,
+      body: "Your payment went through — thanks for shopping with us.",
+      link: `/profile/orders/${order.id}`,
+    }).catch(() => {});
+  }
 
   return {
     orderId: order.id,

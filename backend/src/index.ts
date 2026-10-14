@@ -1,5 +1,6 @@
 import app from "./app.ts";
 import { config } from "./lib/config.ts";
+import { handleRealtimeUpgrade } from "./lib/realtime.ts";
 
 // Startup misconfiguration checks. These are the settings whose wrong value produces links
 // that are silently wrong rather than an error: the process boots fine and the breakage only
@@ -49,6 +50,18 @@ if (config.allowMockPayments) {
   );
 }
 
-app.listen(3000, "0.0.0.0", () => {
+const server = app.listen(3000, "0.0.0.0", () => {
   console.log("Express backend running on port :3000");
+});
+
+// Live updates share the HTTP listener: /realtime upgrades to a socket, everything else
+// stays on Express. nginx strips the /api prefix before proxying, so by the time the
+// request arrives the path is /realtime regardless of what the browser asked for.
+server.on("upgrade", (req, socket, head) => {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  if (url.pathname === "/realtime") {
+    handleRealtimeUpgrade(req, socket, head);
+  } else {
+    socket.destroy();
+  }
 });

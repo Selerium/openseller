@@ -6,6 +6,7 @@ import { config } from "../../lib/config.ts";
 import { parsePage, pageOf } from "../../lib/http.ts";
 import checkTokens from "../../middleware/checkTokens.ts";
 import notFoundHandler from "../../middleware/notFound.ts";
+import { MESSAGE_TAIL } from "../../lib/messages.ts";
 
 /**
  * Order history.
@@ -39,6 +40,8 @@ function toOrderSummary(order: {
   payment: string;
   currency: string;
   subtotalCents: number;
+  discountCode: string | null;
+  discountCents: number;
   shippingCents: number;
   taxCents: number;
   totalCents: number;
@@ -53,6 +56,8 @@ function toOrderSummary(order: {
     payment: order.payment,
     currency: order.currency,
     subtotalCents: order.subtotalCents,
+    discountCode: order.discountCode,
+    discountCents: order.discountCents,
     shippingCents: order.shippingCents,
     taxCents: order.taxCents,
     totalCents: order.totalCents,
@@ -100,18 +105,40 @@ function toOrderDetail(
       note: event.note,
       createdAt: event.createdAt,
     })),
-    complaints: (order.complaints ?? []).map((complaint) => ({
-      id: complaint.id,
-      orderItemId: complaint.orderItemId,
-      reason: complaint.reason,
-      details: complaint.details,
-      status: complaint.status,
-      resolution: complaint.resolution,
-      createdAt: complaint.createdAt,
-      resolvedAt: complaint.resolvedAt,
-    })),
+    complaints: (order.complaints ?? []).map((complaint) => {
+      // Embedded tail: the newest page, oldest-first. `messageCount` says how much more
+      // the thread can pull; the reader pages backwards through GET …/messages.
+      const embedded = [...(complaint.messages ?? [])].slice(0, MESSAGE_TAIL).reverse();
+      return {
+        id: complaint.id,
+        orderItemId: complaint.orderItemId,
+        reason: complaint.reason,
+        details: complaint.details,
+        status: complaint.status,
+        resolution: complaint.resolution,
+        createdAt: complaint.createdAt,
+        resolvedAt: complaint.resolvedAt,
+        messageCount: complaint._count.messages,
+        messages: embedded.map((message) => ({
+          id: message.id,
+          author: message.author,
+          body: message.body,
+          createdAt: message.createdAt,
+        })),
+      };
+    }),
   };
 }
+
+// Newest-first at the query so `take` keeps the tail; the map above flips each page
+// back to thread order. The +1th row is what says an older page exists.
+const complaintThreadInclude = {
+  messages: {
+    orderBy: [{ createdAt: "desc" as const }, { id: "desc" as const }],
+    take: MESSAGE_TAIL + 1,
+  },
+  _count: { select: { messages: true } },
+} as const;
 
 function loadOrder(id: string) {
   return prisma.order.findUnique({
@@ -119,7 +146,7 @@ function loadOrder(id: string) {
     include: {
       items: true,
       events: detailInclude.events,
-      complaints: true,
+      complaints: { include: complaintThreadInclude },
     },
   });
 }
@@ -169,7 +196,7 @@ ordersRouter.get("/guest/:orderId", async (req, res) => {
     include: {
       items: true,
       events: detailInclude.events,
-      complaints: true,
+      complaints: { include: complaintThreadInclude },
     },
   });
 

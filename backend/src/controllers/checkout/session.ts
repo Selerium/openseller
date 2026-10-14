@@ -6,6 +6,12 @@ import { prisma } from "../../lib/prismaClient.ts";
 import { config } from "../../lib/config.ts";
 import { effectivePrice } from "../../lib/catalog.ts";
 import { parseAddressInput, type AddressSnapshot } from "../../lib/address.ts";
+import {
+  claimRedemption,
+  discountCentsFor,
+  normalizeDiscountCode,
+  redeemableCode,
+} from "../../lib/discount.ts";
 import { stripeClient, stripeConfigured } from "../../lib/stripe.ts";
 import { ensureStripeCustomer } from "../../lib/stripeCustomer.ts";
 
@@ -88,6 +94,35 @@ function parseRequestedItems(value: unknown): RequestedLine[] {
 function newGuestToken(): { raw: string; hash: string } {
   const raw = crypto.randomBytes(32).toString("hex");
   return { raw, hash: crypto.createHash("sha256").update(raw).digest("hex") };
+}
+
+/**
+ * Per-line unit prices for the Stripe receipt when a discount applies.
+ *
+ * Each line is scaled by the discounted share of the subtotal and rounded to a whole minor
+ * unit; the last line then absorbs the rounding remainder so the receipt sums to exactly
+ * the order total. Without the fix-up a two-line order could receipt a cent above or below
+ * what the database charged, which is the kind of discrepancy a support ticket is made of.
+ */
+function scaledStripeLines<T extends { unitPriceCents: number; quantity: number }>(
+  lines: T[],
+  subtotalCents: number,
+  discountCents: number,
+): (T & { stripeUnitCents: number })[] {
+  if (discountCents <= 0 || subtotalCents <= 0) {
+    return lines.map((line) => ({ ...line, stripeUnitCents: line.unitPriceCents }));
+  }
+  const target = subtotalCents - discountCents;
+  const scaled = lines.map((line) => ({
+    ...line,
+    stripeUnitCents: Math.round((line.unitPriceCents * target) / subtotalCents),
+  }));
+  const drift =
+    target -
+    scaled.reduce((sum, line) => sum + line.stripeUnitCents * line.quantity, 0);
+  const last = scaled[scaled.length - 1];
+  if (last) last.stripeUnitCents = Math.max(0, last.stripeUnitCents + drift);
+  return scaled;
 }
 
 /**
@@ -229,7 +264,19 @@ checkoutRouter.post("/session", async (req, res) => {
     (sum, line) => sum + line.unitPriceCents * line.quantity,
     0,
   );
-  const totalCents = subtotalCents + SHIPPING_CENTS + TAX_CENTS;
+
+  // --- discount ---
+  //
+  // Re-validated here rather than trusting the percent the checkout page previewed: a code
+  // switched off or exhausted between the preview and the submit is refused instead of
+  // honoured. The redemption is claimed before the order is written, so a failed order
+  // never spends the code; the reverse failure (claimed, then order write fails) can only
+  // over-count by one on a path that charged nobody.
+  const rawDiscountCode = normalizeDiscountCode(req.body?.discountCode);
+  const discount = rawDiscountCode ? await redeemableCode(rawDiscountCode) : null;
+  const discountCents = discount ? discountCentsFor(subtotalCents, discount.percentOff) : 0;
+
+  const totalCents = subtotalCents - discountCents + SHIPPING_CENTS + TAX_CENTS;
 
   // A 100%-off product makes a legitimate order total 0. Free orders are refused rather than
   // sent to Stripe, which rejects a zero-amount payment session anyway, and the refund story for
@@ -242,6 +289,8 @@ checkoutRouter.post("/session", async (req, res) => {
 
   const guest = profileId === null ? newGuestToken() : null;
 
+  if (discount) await claimRedemption(discount.id);
+
   const order = await prisma.order.create({
     data: {
       profileId,
@@ -251,6 +300,8 @@ checkoutRouter.post("/session", async (req, res) => {
       payment: "UNPAID",
       currency: config.currency,
       subtotalCents,
+      discountCode: discount?.code ?? null,
+      discountCents,
       shippingCents: SHIPPING_CENTS,
       taxCents: TAX_CENTS,
       totalCents,
@@ -260,7 +311,9 @@ checkoutRouter.post("/session", async (req, res) => {
       events: {
         create: {
           type: "order.created",
-          note: `Order placed for ${email}`,
+          note: discount
+            ? `Order placed for ${email} (code ${discount.code}, ${discount.percentOff}% off)`
+            : `Order placed for ${email}`,
         },
       },
     },
@@ -322,11 +375,15 @@ checkoutRouter.post("/session", async (req, res) => {
 
     const session = await stripeClient().checkout.sessions.create({
       mode: "payment",
-      line_items: pricedLines.map((line) => ({
+      // Stripe has no negative line items, so a percent-off code scales each line down
+      // instead. Per-unit rounding can drift a cent or two from the order total, which the
+      // last line absorbs: its unit is nudged by the whole remainder, keeping the receipt
+      // total exactly equal to what the order row holds.
+      line_items: scaledStripeLines(pricedLines, subtotalCents, discountCents).map((line) => ({
         quantity: line.quantity,
         price_data: {
           currency: config.currency,
-          unit_amount: line.unitPriceCents,
+          unit_amount: line.stripeUnitCents,
           product_data: {
             // The variant name is part of the line's identity to the customer: two sizes of one
             // product are two line items on the Stripe receipt, not one.

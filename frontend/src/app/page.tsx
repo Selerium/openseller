@@ -115,9 +115,12 @@ export default function HomePage() {
  * be maintained as two different things — the branch that was here first simply still is.
  */
 function Placeholder({ user }: { user: { firstTime?: boolean } | null }) {
+  // Baked in at `next build` from NEXT_PUBLIC_STORE_NAME, so the deploy script must have
+  // written the frontend env before the first build. Falls back to the original name.
+  const storeName = process.env.NEXT_PUBLIC_STORE_NAME || "sampledomain";
   return (
     <Container className="flex flex-1 flex-col items-center justify-center gap-8 py-16 text-center">
-      <h1 className="text-5xl font-bold">sampledomain</h1>
+      <h1 className="text-5xl font-bold">{storeName}</h1>
       <p className="text-lg text-muted-foreground">
         Connect, collaborate, and grow together.
       </p>

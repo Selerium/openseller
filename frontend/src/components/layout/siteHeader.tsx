@@ -9,6 +9,7 @@ import { useIdempotency } from "@/lib/idempotency";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import CartButton from "@/components/storefront/cartButton";
+import NotificationBell from "@/components/notifications/notificationBell";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -43,6 +44,8 @@ export default function SiteHeader() {
   const idem = useIdempotency();
 
   const items = primaryNav(user);
+  // Same build-time source as the homepage placeholder: NEXT_PUBLIC_STORE_NAME.
+  const storeName = process.env.NEXT_PUBLIC_STORE_NAME || "sampledomain";
 
   async function handleLogout() {
     try {
@@ -61,7 +64,7 @@ export default function SiteHeader() {
       <Container className="flex h-14 items-center gap-4">
         <Link href={homeHref(user)} className="flex items-center gap-2 font-semibold">
           <Store className="size-4" />
-          <span>sampledomain</span>
+          <span>{storeName}</span>
         </Link>
 
         <nav className="hidden flex-1 items-center gap-1 md:flex">
@@ -88,6 +91,8 @@ export default function SiteHeader() {
 
         {showsCart(user) && <CartButton />}
 
+        <NotificationBell />
+
         {user ? (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -103,6 +108,13 @@ export default function SiteHeader() {
               <DropdownMenuSeparator />
               <DropdownMenuItem asChild>
                 <Link href="/profile">Profile</Link>
+              </DropdownMenuItem>
+              <DropdownMenuItem asChild>
+                <Link
+                  href={user.role === "ADMIN" ? "/admin/notifications" : "/profile/notifications"}
+                >
+                  Notifications
+                </Link>
               </DropdownMenuItem>
               <DropdownMenuItem asChild>
                 <Link href="/settings">Settings</Link>

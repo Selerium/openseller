@@ -4,6 +4,7 @@ import { Prisma } from "../../generated/prisma/client.ts";
 import { ok, pageOf, parsePage, STABLE_ID_ORDER } from "../../lib/http.ts";
 import AppError from "../../lib/appError.ts";
 import checkTokens from "../../middleware/checkTokens.ts";
+import { notifyAdmins } from "../../lib/notify.ts";
 
 const reviewsRouter = express.Router();
 
@@ -48,6 +49,13 @@ reviewsRouter.post("/:productId", checkTokens, async (req, res) => {
     },
   });
   ok(res, review);
+
+  void notifyAdmins({
+    type: "review.created",
+    title: `New ${rating}-star review on ${product.title}`,
+    body: typeof body === "string" && body.trim() ? body.trim().slice(0, 140) : null,
+    link: `/admin/products/${productId}`,
+  }).catch(() => {});
 });
 
 export default reviewsRouter;

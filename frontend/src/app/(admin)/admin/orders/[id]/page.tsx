@@ -14,6 +14,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Rating } from "@/components/ui/rating";
 import Container from "@/components/layout/container";
+import ComplaintThread, {
+  type OlderPage,
+  type ThreadMessage,
+} from "@/components/complaints/complaintThread";
+import { useLiveReload } from "@/components/complaints/useLiveReload";
 import {
   canCancelOrder,
   canMarkDelivered,
@@ -49,6 +54,8 @@ interface AdminOrder {
   taxCents: number;
   totalCents: number;
   openComplaints: number;
+  discountCode: string | null;
+  discountCents: number;
   shippingAddress: Address;
   billingAddress: Address | null;
   createdAt: string;
@@ -77,6 +84,13 @@ interface AdminOrder {
     details: string;
     resolution: string | null;
     createdAt: string;
+    messageCount: number;
+    messages: Array<{
+      id: string;
+      author: string;
+      body: string;
+      createdAt: string;
+    }>;
   }>;
   reviews: Array<{
     id: string;
@@ -256,6 +270,63 @@ function OrderActions({
   );
 }
 
+/**
+ * One complaint on this order, below the timeline: description, thread, reply box, and a
+ * way through to the full complaint view for status changes. Reuses the same thread as
+ * the complaint detail page so the two can never render different conversations.
+ */
+function OrderComplaintCard({
+  complaint,
+  onReplied,
+}: {
+  complaint: AdminOrder["complaints"][number];
+  onReplied: () => Promise<void>;
+}) {
+  // Live thread: the customer's replies re-read the order as they arrive.
+  useLiveReload([`complaint:${complaint.id}`], () => {
+    void onReplied();
+  });
+
+  async function sendReply(body: string) {
+    await api(`/admin/complaints/${complaint.id}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ body }),
+    });
+    await onReplied();
+  }
+
+  async function loadOlder(beforeId: string): Promise<OlderPage> {
+    const res = await api<{ items: ThreadMessage[]; hasMore: boolean }>(
+      `/admin/complaints/${complaint.id}/messages?before=${encodeURIComponent(beforeId)}&limit=20`,
+    );
+    return { messages: res.data.items, hasMore: res.data.hasMore };
+  }
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between gap-3">
+        <CardTitle className="text-base">
+          Complaint • {complaint.reason.replace(/_/g, " ")}
+        </CardTitle>
+        <div className="flex items-center gap-2">
+          <Badge variant="outline">{complaint.status}</Badge>
+          <Button variant="link" size="sm" className="h-auto p-0" asChild>
+            <Link href={`/admin/complaints/${complaint.id}`}>Open →</Link>
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <ComplaintThread
+          complaint={complaint}
+          viewer="admin"
+          onSend={sendReply}
+          loadOlder={loadOlder}
+        />
+      </CardContent>
+    </Card>
+  );
+}
+
 function OrderDetailPage() {
   const params = useParams();
   // The route is /admin/orders/[id], so the param is `id`. It used to be read as `orderId`,
@@ -372,6 +443,17 @@ function OrderDetailPage() {
                     {formatMoney(order.shippingCents, order.currency)}
                   </dd>
                 </div>
+                {(order.discountCents ?? 0) > 0 && (
+                  <div className="flex justify-between text-green-700 dark:text-green-400">
+                    <dt>
+                      Discount
+                      {order.discountCode ? ` (${order.discountCode})` : ""}
+                    </dt>
+                    <dd className="tabular-nums">
+                      −{formatMoney(order.discountCents, order.currency)}
+                    </dd>
+                  </div>
+                )}
                 <div className="flex justify-between">
                   <dt className="text-muted-foreground">Tax</dt>
                   <dd className="tabular-nums">
@@ -393,6 +475,8 @@ function OrderDetailPage() {
               <CardTitle>Timeline</CardTitle>
             </CardHeader>
             <CardContent>
+              {/* Own scroll so a long history never pushes the complaints below it off-screen. */}
+              <div className="max-h-80 overflow-y-auto pr-1">
               <ol className="space-y-4">
                 {order.timeline.map((event) => (
                   <li key={event.id} className="flex items-start justify-between gap-4">
@@ -413,29 +497,20 @@ function OrderDetailPage() {
                   </li>
                 ))}
               </ol>
+              </div>
             </CardContent>
           </Card>
 
           {order.complaints.length > 0 && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Complaints</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {order.complaints.map((complaint) => (
-                  <div key={complaint.id} className="border-b pb-4 last:border-0 last:pb-0">
-                    <div className="mb-1 flex items-center justify-between gap-4">
-                      <span className="font-medium">{complaint.reason}</span>
-                      <Badge variant="outline">{complaint.status}</Badge>
-                    </div>
-                    <p className="text-sm text-muted-foreground">{complaint.details}</p>
-                    {complaint.resolution && (
-                      <p className="mt-1 text-sm">{complaint.resolution}</p>
-                    )}
-                  </div>
-                ))}
-              </CardContent>
-            </Card>
+            <div className="flex flex-col gap-4">
+              {order.complaints.map((complaint) => (
+                <OrderComplaintCard
+                  key={complaint.id}
+                  complaint={complaint}
+                  onReplied={load}
+                />
+              ))}
+            </div>
           )}
 
           {/* The buyer's own words about what is in this order. A review hangs off a product,

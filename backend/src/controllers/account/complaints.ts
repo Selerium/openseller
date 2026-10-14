@@ -4,7 +4,11 @@ import AppError from "../../lib/appError.ts";
 import { prisma, PaymentStatus } from "../../lib/prismaClient.ts";
 import { ComplaintReason } from "../../generated/prisma/client.ts";
 import checkTokens from "../../middleware/checkTokens.ts";
+import optionalAuth from "../../middleware/optionalAuth.ts";
 import notFoundHandler from "../../middleware/notFound.ts";
+import { notifyAdmins } from "../../lib/notify.ts";
+import { publish } from "../../lib/realtime.ts";
+import { pageMessages, parseMessageLimit } from "../../lib/messages.ts";
 
 /**
  * Complaints: a dispute against something that was actually bought.
@@ -21,6 +25,11 @@ const complaintsRouter = express.Router();
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_DETAILS = 2000;
+const MAX_MESSAGE = 2000;
+
+function sha256(value: string): string {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
 
 function parseReason(value: unknown): ComplaintReason {
   if (typeof value !== "string" || !Object.values(ComplaintReason).includes(value as ComplaintReason)) {
@@ -106,7 +115,7 @@ async function createComplaint(
   // status, because FULFILLED is still paid and CANCELLED-after-payment is still disputable.
   const paid = await prisma.order.findUnique({
     where: { id: order.id },
-    select: { payment: true },
+    select: { payment: true, number: true },
   });
   if (!paid || paid.payment !== PaymentStatus.PAID) {
     throw new AppError("Only a paid order can be disputed", 409);
@@ -141,6 +150,15 @@ async function createComplaint(
     },
   });
 
+  // Support's inbox, not the filer's: the shopper sees their own complaint on the order
+  // page already. Fire-and-forget — a notification failure must not fail the filing.
+  void notifyAdmins({
+    type: "complaint.opened",
+    title: `New complaint on order #${paid.number}`,
+    body: `${reason.replace(/_/g, " ")} — ${details.slice(0, 140)}`,
+    link: `/admin/complaints/${complaint.id}`,
+  }).catch(() => {});
+
   return complaint;
 }
 
@@ -156,7 +174,75 @@ complaintsRouter.post("/guest/:orderId", async (req, res) => {
   });
 });
 
-// Everything below needs a session.
+/** Read the thread, newest page first. Guests pass the order token in x-guest-token. */
+complaintsRouter.get("/:complaintId/messages", optionalAuth, async (req, res) => {
+  const complaint = await authoriseComplaint(req.params.complaintId, req);
+  const rawBefore = req.query.before;
+  const before =
+    rawBefore === undefined || rawBefore === null || rawBefore === ""
+      ? null
+      : String(rawBefore);
+  const page = await pageMessages(
+    complaint.id,
+    before,
+    parseMessageLimit(req.query.limit),
+  );
+  res.status(200).json({ data: page, error: false, message: "" });
+});
+
+/**
+ * Reply as the customer.
+ *
+ * Replying to a closed complaint reopens it: a customer writing back is the strongest
+ * signal the issue is not settled, and leaving the thread RESOLVED while words pile up
+ * underneath would tell the admin queue everything is fine. Replies stay out of the
+ * order timeline — the thread itself is the record, and the inbox + socket carry the
+ * announcement — so only the status flip touches the complaint row.
+ */
+complaintsRouter.post("/:complaintId/messages", optionalAuth, async (req, res) => {
+  const complaint = await authoriseComplaint(req.params.complaintId, req);
+  const body = parseMessageBody(req.body?.body);
+
+  const reopened = complaint.status === "RESOLVED" || complaint.status === "DISMISSED";
+
+  const message = await prisma.complaintMessage.create({
+    data: {
+      complaintId: complaint.id,
+      author: "CUSTOMER",
+      authorProfileId: req.user?.id ?? null,
+      body,
+    },
+    select: messageSelect,
+  });
+
+  if (reopened) {
+    await prisma.complaint.update({
+      where: { id: complaint.id },
+      data: { status: "OPEN", resolvedAt: null },
+    });
+  }
+
+  res.status(201).json({ data: message, error: false, message: "Reply sent" });
+
+  // The live thread for anyone watching, plus support's inbox for everyone else.
+  publish(`complaint:${complaint.id}`, "message.created", message);
+  if (reopened) {
+    publish(`complaint:${complaint.id}`, "complaint.updated", {
+      id: complaint.id,
+      status: "OPEN",
+      resolution: complaint.resolution,
+    });
+  }
+  void notifyAdmins({
+    type: "complaint.message",
+    title: `New reply on order #${complaint.order.number}`,
+    body,
+    link: `/admin/complaints/${complaint.id}`,
+  }).catch(() => {});
+});
+
+// Everything below needs a session, except the message thread: a guest holding the
+// order's one-time token may read and reply without one, authorised per-complaint below.
 complaintsRouter.use(checkTokens);
 
 complaintsRouter.post("/:orderId", async (req, res) => {
@@ -199,6 +285,54 @@ complaintsRouter.get("/reasons", async (req, res) => {
   });
   res.status(200).json({ data: reasons, error: false, message: "" });
 });
+
+/**
+ * The message thread on one complaint — the back-and-forth between customer and support.
+ *
+ * Authorised the same way as filing: the complaint's own customer (by session, on either
+ * the complaint or its order, since adoption can move the order after filing) or a guest
+ * holding the order's one-time token. Anything else is a 404 that confirms nothing.
+ */
+async function authoriseComplaint(complaintId: string, req: express.Request) {
+  if (!UUID.test(complaintId)) throw new AppError("Complaint not found", 404);
+
+  const complaint = await prisma.complaint.findUnique({
+    where: { id: complaintId },
+    include: {
+      order: { select: { id: true, number: true, profileId: true, guestTokenHash: true } },
+    },
+  });
+  if (!complaint || !complaint.order) throw new AppError("Complaint not found", 404);
+
+  const token = req.get("x-guest-token");
+  const tokenOwns = Boolean(
+    token && complaint.order.guestTokenHash === sha256(token),
+  );
+  const sessionOwns = Boolean(
+    req.user?.id &&
+      (complaint.profileId === req.user.id || complaint.order.profileId === req.user.id),
+  );
+  if (!tokenOwns && !sessionOwns) throw new AppError("Complaint not found", 404);
+
+  return complaint;
+}
+
+function parseMessageBody(value: unknown): string {
+  if (typeof value !== "string") throw new AppError("Please write a message", 400);
+  const cleaned = value.trim();
+  if (!cleaned) throw new AppError("Please write a message", 400);
+  if (cleaned.length > MAX_MESSAGE) {
+    throw new AppError(`Please keep messages under ${MAX_MESSAGE} characters`, 400);
+  }
+  return cleaned;
+}
+
+const messageSelect = {
+  id: true,
+  author: true,
+  body: true,
+  createdAt: true,
+} as const;
 
 complaintsRouter.use(notFoundHandler);
 

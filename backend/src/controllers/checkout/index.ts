@@ -1,6 +1,7 @@
 import express from "express";
 import optionalAuth from "../../middleware/optionalAuth.ts";
 import sessionRouter from "./session.ts";
+import discountValidateRouter from "./validate.ts";
 import mockPayRouter from "./mockPay.ts";
 import confirmRouter from "./confirm.ts";
 import cancelRouter from "./cancel.ts";
@@ -33,6 +34,7 @@ checkoutRouter.use(optionalAuth);
 // POST /session, so the order between them does not actually matter. It is here to match the
 // reading order of the routes above.
 checkoutRouter.use("/mock-pay", mockPayRouter);
+checkoutRouter.use("/discount", discountValidateRouter);
 checkoutRouter.use("/confirm", confirmRouter);
 checkoutRouter.use("/cancel", cancelRouter);
 checkoutRouter.use("", sessionRouter);

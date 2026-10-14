@@ -85,6 +85,16 @@ export default function MobileNav({
             </SheetClose>
             <SheetClose asChild>
               <Link
+                href={
+                  user.role === "ADMIN" ? "/admin/notifications" : "/profile/notifications"
+                }
+                className={linkClass(pathname.endsWith("/notifications"))}
+              >
+                Notifications
+              </Link>
+            </SheetClose>
+            <SheetClose asChild>
+              <Link
                 href="/settings"
                 className={linkClass(pathname.startsWith("/settings"))}
               >

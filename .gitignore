@@ -1,6 +1,10 @@
 # Local env files. The .example.env.* files next to them are the committed templates.
 config/.env.*
 
+# Deploy script state. Single source of truth for a self-hosted install, and it holds
+# secrets — never commit it.
+.deploy.env
+
 # Postgres cluster (bind mounted)
 data/
 

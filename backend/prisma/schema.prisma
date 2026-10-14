@@ -83,6 +83,7 @@ model Profile {
   reviews        Review[]
   paymentMethods PaymentMethod[]
   complaints     Complaint[]
+  notifications  Notification[]
 }
 
 enum Gender {
@@ -336,6 +337,12 @@ model Order {
   taxCents      Int    @default(0)
   totalCents    Int
 
+  // Percent-off promo applied at checkout. The code is snapshotted as a string (not a
+  // relation) so the order stays readable after the code is edited or deleted, and the
+  // cents are stored so the total cannot drift from what was charged.
+  discountCode  String?
+  discountCents Int     @default(0)
+
   // Address snapshots, so an order stays readable after the customer edits their address book
   shippingAddress Json
   billingAddress  Json?
@@ -438,10 +445,91 @@ model Complaint {
   // admin Profile id
   resolvedBy String?
 
+  messages ComplaintMessage[]
+
   @@index([status, createdAt])
   @@index([reason, status])
   @@index([orderId])
   @@index([profileId])
+}
+
+enum MessageAuthor {
+  CUSTOMER
+  ADMIN
+}
+
+// ---------------------------------------------------------------------------
+// Complaint messages: the back-and-forth on a dispute, rendered as a thread.
+// A message is never edited or deleted; the thread is the audit trail, which is why
+// status changes live on Complaint and the words live here.
+// ---------------------------------------------------------------------------
+
+model ComplaintMessage {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  complaintId String
+  complaint   Complaint @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+
+  author MessageAuthor
+  // Profile id of the writer when known (customer's or admin's). Null for a guest who
+  // replied with the order token before ever creating an account.
+  authorProfileId String?
+  body            String
+
+  @@index([complaintId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Notifications: durable inbox rows behind the realtime bell.
+// A realtime event alone is not enough — a shopper who was offline when support replied
+// must still see it — so every push-worthy fact is also a row here, and the socket is
+// the fast path while this table is the record.
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  profileId String
+  profile   Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  // complaint.opened | complaint.message | complaint.status | order.status | order.paid
+  // | review.created — free-form rather than an enum so new kinds never need a migration.
+  type  String
+  title String
+  body  String?
+  // Where the app should take the reader: /profile/orders/<id> for a shopper,
+  // /admin/complaints/<id> for support.
+  link  String?
+
+  readAt DateTime?
+
+  @@index([profileId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Discount codes: percent-off promos an admin creates and a shopper applies at checkout.
+// The code is validated and snapshotted in the checkout session, never trusted from the
+// client, so the percent on the order is always one the database held at purchase time.
+// ---------------------------------------------------------------------------
+
+model DiscountCode {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Uppercase, no spaces. Checkout upper-cases input before comparing, so "save10" redeems
+  // "SAVE10" and the stored form is the canonical one.
+  code       String  @unique
+  percentOff Int
+  active     Boolean @default(true)
+  expiresAt  DateTime?
+  // Null means unlimited redemptions.
+  maxUses    Int?
+  usedCount  Int     @default(0)
+
+  @@index([active])
 }
 
 // ---------------------------------------------------------------------------

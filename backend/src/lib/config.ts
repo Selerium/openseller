@@ -38,6 +38,16 @@ export const config = {
   // directly comparable. Multi-currency would require grouping by Order.currency.
   currency: normalizeCurrency(process.env.STORE_CURRENCY || "usd"),
 
+  // Public-facing shop name. Used in email subjects/bodies and mirrored to the
+  // storefront via NEXT_PUBLIC_STORE_NAME, which the deploy script derives from the
+  // same SITE_NAME answer so the two can never disagree.
+  storeName: (process.env.STORE_NAME || "sampledomain").trim() || "sampledomain",
+
+  // Sender for every outbound email. Set this to an address on a domain you control in
+  // Resend, or delivery fails at send time; the deploy script defaults it to
+  // do-not-reply@<site domain>.
+  emailFrom: (process.env.EMAIL_FROM || "do-not-reply@sampledomain.ae").trim(),
+
   // divisor for converting integer minor units to a decimal amount. JPY has no minor unit,
   // so 10000 minor units is 10000 yen, not 100.
   currencyMinorUnitDivisor: minorUnitDivisor(process.env.STORE_CURRENCY || "usd"),

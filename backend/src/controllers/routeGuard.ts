@@ -9,6 +9,7 @@ import adminRouter from "./admin/index.ts";
 import addressesRouter from "./account/addresses.ts";
 import ordersRouter from "./account/orders.ts";
 import complaintsRouter from "./account/complaints.ts";
+import notificationsRouter from "./account/notifications.ts";
 import paymentMethodsRouter from "./account/paymentMethods.ts";
 import accountDeleteRouter from "./account/delete.ts";
 
@@ -30,7 +31,9 @@ const protectedRouter = express.Router();
 // but unreachable in practice: without checkTokens nothing populated req.user, so DELETE
 // /account/delete answered 401 for every caller (correct by accident) and the setup-intent route
 // dereferenced req.user!.profileId and threw a 500. Both are written against req.user.id.
-const GUARDED = ["/me", "/profile", "/profiles", "/admin", "/addresses", "/account"];
+// "/notifications" has no guest routes (an inbox belongs to a session), so it is guarded
+// at the mount like /addresses rather than inside the router like /orders.
+const GUARDED = ["/me", "/profile", "/profiles", "/admin", "/addresses", "/account", "/notifications"];
 
 for (const path of GUARDED) {
   protectedRouter.use(path, checkTokens);
@@ -43,6 +46,7 @@ protectedRouter.use('/profiles', profilesHandler)
 protectedRouter.use('/addresses', addressesRouter)
 protectedRouter.use('/orders', ordersRouter)
 protectedRouter.use('/complaints', complaintsRouter)
+protectedRouter.use('/notifications', notificationsRouter)
 protectedRouter.use('/account/payment-methods', paymentMethodsRouter)
 protectedRouter.use('/account', accountDeleteRouter)
 // mounted from inside the protected chain so these routes run checkTokens first;

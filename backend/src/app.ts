@@ -5,6 +5,7 @@ import path from "node:path";
 
 import registerHandler from "./controllers/register.ts";
 import loginHandler from "./controllers/login.ts";
+import checkEmailHandler from "./controllers/checkEmail.ts";
 import emailVerificationHandler from "./controllers/emailVerification.ts";
 import resendVerificationHandler from "./controllers/resendVerification.ts";
 import forgotPasswordHandler from "./controllers/forgotPassword.ts";
@@ -105,6 +106,7 @@ app.use(idempotency);
 
 app.use("/register", registerHandler);
 app.use("/login", loginHandler);
+app.use("/check-email", checkEmailHandler);
 app.use("/verify-email", emailVerificationHandler);
 app.use("/resend-verification", resendVerificationHandler);
 app.use("/forgot-password", forgotPasswordHandler);

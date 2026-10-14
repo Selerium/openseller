@@ -4,6 +4,8 @@ import { prisma, OrderStatus, PaymentStatus } from "../../lib/prismaClient.ts";
 import { Prisma } from "../../generated/prisma/client.ts";
 import { ok, pageOf, parsePage, STABLE_ID_ORDER } from "../../lib/http.ts";
 import { stripeClient } from "../../lib/stripe.ts";
+import { notify } from "../../lib/notify.ts";
+import { MESSAGE_TAIL } from "../../lib/messages.ts";
 
 const ordersRouter = express.Router();
 
@@ -24,7 +26,17 @@ const detailInclude = {
   },
   items: { orderBy: { title: "asc" as const } },
   events: { orderBy: { createdAt: "asc" as const } },
-  complaints: { orderBy: { createdAt: "desc" as const } },
+  complaints: {
+    orderBy: { createdAt: "desc" as const },
+    include: {
+      // Newest-first so `take` keeps the tail; the map flips each page to thread order.
+      messages: {
+        orderBy: [{ createdAt: "desc" as const }, { id: "desc" as const }],
+        take: MESSAGE_TAIL + 1,
+      },
+      _count: { select: { messages: true } },
+    },
+  },
 } as const;
 
 function isOrderStatus(value: string): boolean {
@@ -116,6 +128,8 @@ async function toOrderDetail(order: DetailOrder | null) {
     guestEmail: order.guestEmail,
     buyerName: order.profile?.name ?? null,
     subtotalCents: order.subtotalCents,
+    discountCode: order.discountCode,
+    discountCents: order.discountCents,
     shippingCents: order.shippingCents,
     taxCents: order.taxCents,
     stripeCheckoutSessionId: order.stripeCheckoutSessionId,
@@ -148,6 +162,13 @@ async function toOrderDetail(order: DetailOrder | null) {
       details: complaint.details,
       resolution: complaint.resolution,
       createdAt: complaint.createdAt,
+      messageCount: complaint._count.messages,
+      messages: [...complaint.messages].slice(0, MESSAGE_TAIL).reverse().map((message) => ({
+        id: message.id,
+        author: message.author,
+        body: message.body,
+        createdAt: message.createdAt,
+      })),
     })),
     reviews: reviews.map((review) => ({
       id: review.id,
@@ -328,6 +349,25 @@ ordersRouter.patch("/:id", async (req, res) => {
     await toOrderDetail(await loadDetail({ id: updated.id })),
     status === "FULFILLED" ? "Order marked as delivered" : "Order cancelled",
   );
+
+  // The shopper's inbox, not the timeline: the timeline is already written above, and a
+  // guest order (no profile) has nobody to notify.
+  if (updated.profileId) {
+    void notify(updated.profileId, {
+      type: "order.status",
+      title:
+        status === "FULFILLED"
+          ? `Order #${updated.number} delivered`
+          : `Order #${updated.number} cancelled`,
+      body:
+        status === "FULFILLED"
+          ? "Your order was marked as delivered."
+          : paidBeforeCancel
+            ? "Your order was cancelled after payment — a refund is owed; support will be in touch."
+            : "Your order was cancelled.",
+      link: `/profile/orders/${updated.id}`,
+    }).catch(() => {});
+  }
 });
 
 /**
@@ -412,6 +452,15 @@ ordersRouter.post("/:id/refund", async (req, res) => {
     await toOrderDetail(await loadDetail({ id: order.id })),
     refundId ? "Refund issued" : "Refund recorded",
   );
+
+  if (order.profileId) {
+    void notify(order.profileId, {
+      type: "order.status",
+      title: `Order #${order.number} refunded`,
+      body: "The money is on its way back to the original payment method.",
+      link: `/profile/orders/${order.id}`,
+    }).catch(() => {});
+  }
 });
 
 /**
